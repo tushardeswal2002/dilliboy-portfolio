@@ -2040,7 +2040,7 @@ export default function Home() {
 
           <div className="grid gap-6 lg:grid-cols-2">
             <PerformanceCard
-              title="Wreckfest.jpg"
+              title="Wreckfest"
               year="2024"
               location="Mumbai, India"
               description="Performed alongside Karan Kanchan, Ritviz, Chaar Diwari, Amin Jazz & more at Wreckfest 2024."
@@ -2049,7 +2049,7 @@ export default function Home() {
             />
 
             <PerformanceCard
-              title="The Yaksha Show.jpg"
+              title="The Yaksha Show"
               year="2026"
               location="Delhi, India"
               description="Performed alongside Purab Paschim and IMO Clan at the Prelude to The Yaksha Show in May 2026."
