@@ -2044,7 +2044,7 @@ export default function Home() {
               year="2024"
               location="Mumbai, India"
               description="Performed alongside Karan Kanchan, Ritviz, Chaar Diwari, Amin Jazz & more at Wreckfest 2024."
-              image="/media/wreckfest.jpg"
+              image="/media/Wreckfest.jpg"
               video="https://www.youtube.com/embed/_QSBF4qawEs"
             />
 
@@ -2053,7 +2053,7 @@ export default function Home() {
               year="2026"
               location="Delhi, India"
               description="Performed alongside Purab Paschim and IMO Clan at the Prelude to The Yaksha Show in May 2026."
-              image="/media/the yaksha show.jpg"
+              image="/media/The Yaksha Show.jpg"
               video="https://www.youtube.com/embed/2IWZtWcsmGQ"
             />
           </div>
