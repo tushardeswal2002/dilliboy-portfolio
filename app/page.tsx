@@ -206,7 +206,7 @@ function easeOutExpo(t: number) {
   return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
 }
 
-function smoothScrollToId(id: string, offset = 84) {
+function smoothScrollToId(id: string, offset = 84, duration = 900) {
   const element = document.getElementById(id);
   if (!element) return;
 
@@ -214,12 +214,8 @@ function smoothScrollToId(id: string, offset = 84) {
     typeof window !== 'undefined' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const isSmallScreen =
-    typeof window !== 'undefined' && window.innerWidth < 768;
-  const duration = isSmallScreen ? 680 : 820;
-
   const getTargetY = () =>
-    Math.max(0, element.getBoundingClientRect().top + window.scrollY - offset);
+    element.getBoundingClientRect().top + window.scrollY - offset;
 
   if (prefersReduced) {
     window.scrollTo({ top: getTargetY() });
@@ -230,28 +226,30 @@ function smoothScrollToId(id: string, offset = 84) {
   const startY = window.scrollY;
   const targetY = getTargetY();
   const distance = targetY - startY;
-  if (Math.abs(distance) < 2) return;
-
   const startTime = performance.now();
+
+  // If the person grabs the page mid-flight (wheel/touch/keyboard), the
+  // animation backs off immediately instead of fighting their input —
+  // that fight is exactly what reads as "stiff" or "janky".
   const cancel = () => {
     scrollAnimationToken += 1;
   };
-
   window.addEventListener('wheel', cancel, { passive: true, once: true });
   window.addEventListener('touchstart', cancel, { passive: true, once: true });
-  window.addEventListener('keydown', cancel, { passive: true, once: true });
 
   const step = (now: number) => {
     if (token !== scrollAnimationToken) return;
-    const t = Math.min(1, (now - startTime) / duration);
-    window.scrollTo(0, startY + distance * easeOutExpo(t));
+
+    const elapsed = now - startTime;
+    const t = Math.min(1, elapsed / duration);
+    const eased = easeOutExpo(t);
+    window.scrollTo(0, startY + distance * eased);
 
     if (t < 1) {
       requestAnimationFrame(step);
     } else {
       window.removeEventListener('wheel', cancel);
       window.removeEventListener('touchstart', cancel);
-      window.removeEventListener('keydown', cancel);
     }
   };
 
@@ -265,6 +263,24 @@ function smoothScrollToId(id: string, offset = 84) {
 function GlobalStyles() {
   return (
     <style jsx global>{`
+      html {
+        /*
+          The nav / hero buttons drive scrolling manually via
+          smoothScrollToId's own rAF + easing loop. If the browser's
+          native CSS smooth-scroll is ALSO turned on, every
+          window.scrollTo() call inside that loop kicks off its own
+          native smooth animation on top of the manual one, and the
+          two fight each other every frame — that's what reads as a
+          stutter/jank instead of one clean glide. Keeping this at
+          "auto" hands scrolling fully to the manual driver.
+        */
+        scroll-behavior: auto;
+      }
+
+      * {
+        -webkit-tap-highlight-color: transparent;
+      }
+
       @media (pointer: fine) {
         .custom-cursor-active,
         .custom-cursor-active * {
@@ -340,22 +356,6 @@ function GlobalStyles() {
         display: none;
       }
 
-      @media (max-width: 767px) {
-        html {
-          -webkit-text-size-adjust: 100%;
-          text-size-adjust: 100%;
-        }
-
-        body {
-          overscroll-behavior-x: none;
-        }
-
-        button,
-        a {
-          -webkit-tap-highlight-color: transparent;
-        }
-      }
-
       /*
         The nav is fixed at the top (h-16 = 64px). Section scroll offset
         is now handled entirely by smoothScrollToId's own offset math,
@@ -388,6 +388,19 @@ function GlobalStyles() {
         }
         to {
           transform: translate3d(0, 0, 0);
+        }
+      }
+
+      /*
+        Mobile perf: large blurred glow/gradient layers are cheap on
+        desktop GPUs but expensive to repaint on mid-range phones,
+        especially while scrolling. Trim blur radius and disable the
+        constantly-animating flowing gradient below the sm breakpoint.
+      */
+      @media (max-width: 640px) {
+        .flow-gradient {
+          animation: none;
+          background-position: 30% 40%;
         }
       }
     `}</style>
@@ -577,13 +590,13 @@ function BeatPlayer() {
   const wheelTargetRef = useRef<number | null>(null);
   const wheelRafRef = useRef<number | null>(null);
 
-  // Wheel/trackpad input scrolls the row horizontally with its own
-  // eased approach to the target instead of native jump-per-tick
-  // scrolling, so the row glides instead of stepping.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-
+  // Single eased-approach loop that owns scrollLeft for this row —
+  // used by BOTH wheel/trackpad input and by "center the newly
+  // selected beat" below. Routing both through the same loop (instead
+  // of wheel using this and selection using the browser's own
+  // scrollIntoView) means there's only ever one thing driving
+  // scrollLeft at a time, so they never fight each other.
+  const runRowScrollLoop = useCallback(() => {
     const animate = () => {
       const node = scrollRef.current;
       const target = wheelTargetRef.current;
@@ -602,6 +615,18 @@ function BeatPlayer() {
       wheelRafRef.current = requestAnimationFrame(animate);
     };
 
+    if (wheelRafRef.current === null) {
+      wheelRafRef.current = requestAnimationFrame(animate);
+    }
+  }, []);
+
+  // Wheel/trackpad input scrolls the row horizontally with its own
+  // eased approach to the target instead of native jump-per-tick
+  // scrolling, so the row glides instead of stepping.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
     const onWheel = (event: WheelEvent) => {
       // Only hijack gestures that read as vertical intent (mouse wheel,
       // or a trackpad scroll steeper than it is sideways) — genuine
@@ -614,10 +639,7 @@ function BeatPlayer() {
       event.preventDefault();
       const current = wheelTargetRef.current ?? el.scrollLeft;
       wheelTargetRef.current = Math.min(max, Math.max(0, current + event.deltaY));
-
-      if (wheelRafRef.current === null) {
-        wheelRafRef.current = requestAnimationFrame(animate);
-      }
+      runRowScrollLoop();
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -625,7 +647,7 @@ function BeatPlayer() {
       el.removeEventListener('wheel', onWheel);
       if (wheelRafRef.current) cancelAnimationFrame(wheelRafRef.current);
     };
-  }, []);
+  }, [runRowScrollLoop]);
 
   // Direct DOM write on scroll (not React state) so the indicator can
   // track every scroll tick without re-rendering the whole row.
@@ -644,26 +666,44 @@ function BeatPlayer() {
     return () => window.removeEventListener('resize', handleScroll);
   }, [handleScroll]);
 
+  // Centers the newly-active card. This used to call the browser's own
+  // scrollIntoView({behavior:'smooth'}) — a SECOND, independently-timed
+  // animation running at the same moment the card's width is also
+  // animating (see the card's `animate={{ width }}` below), plus three
+  // stacked setTimeouts forcing layout reads (getBoundingClientRect)
+  // while both of those were still moving. That combination — two
+  // uncoordinated animations plus repeated forced layout — is what
+  // read as jerky/laggy. Now the target position is computed directly
+  // from the same width formula the cards animate to (so it doesn't
+  // need to read the DOM mid-transition) and is driven by the exact
+  // same eased loop the wheel uses, so there's only one thing moving
+  // scrollLeft, once, on one timeline.
   useEffect(() => {
     if (!currentBeatId) return;
-    const el = cardRefs.current[currentBeatId];
-    el?.scrollIntoView({
-      behavior: 'smooth',
-      inline: 'center',
-      block: 'nearest',
+    const container = scrollRef.current;
+    if (!container) return;
+    const index = beats.findIndex((b) => b.id === currentBeatId);
+    if (index === -1) return;
+
+    const raf = requestAnimationFrame(() => {
+      const vw = window.innerWidth;
+      const gap = 12; // matches the row's gap-3
+      const activeWidth = Math.min(vw * 0.78, 560);
+      const inactiveWidth = Math.min(vw * 0.42, 190);
+
+      let offset = 0;
+      for (let i = 0; i < index; i += 1) {
+        offset += inactiveWidth + gap;
+      }
+
+      const target = offset + activeWidth / 2 - container.clientWidth / 2;
+      const max = container.scrollWidth - container.clientWidth;
+      wheelTargetRef.current = Math.min(Math.max(target, 0), Math.max(max, 0));
+      runRowScrollLoop();
     });
-    // scrollIntoView animates asynchronously, so nudge the indicator a
-    // few times while it settles instead of only reading the pre-scroll
-    // position.
-    const t1 = setTimeout(handleScroll, 150);
-    const t2 = setTimeout(handleScroll, 400);
-    const t3 = setTimeout(handleScroll, 700);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-    };
-  }, [currentBeatId, handleScroll]);
+
+    return () => cancelAnimationFrame(raf);
+  }, [currentBeatId, runRowScrollLoop]);
 
   const handleProgressClick = (
     event: React.MouseEvent<HTMLDivElement>
@@ -699,7 +739,7 @@ function BeatPlayer() {
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="no-scrollbar flex h-[312px] w-full min-w-0 gap-3 overflow-x-auto scroll-smooth px-4 pb-2 pt-3 md:h-[332px] md:px-6"
+        className="no-scrollbar flex h-[312px] w-full min-w-0 gap-3 overflow-x-auto px-4 pb-2 pt-3 md:h-[332px] md:px-6"
         style={{
           maskImage:
             'linear-gradient(to right, transparent 0%, rgba(0,0,0,0.35) 4%, black 13%, black 87%, rgba(0,0,0,0.35) 96%, transparent 100%)',
@@ -716,7 +756,6 @@ function BeatPlayer() {
               ref={(el) => {
                 cardRefs.current[beat.id] = el;
               }}
-              layout
               className="relative h-full shrink-0 snap-start overflow-hidden rounded-[24px]"
               animate={{
                 width: isActive ? 'min(78vw, 560px)' : 'min(42vw, 190px)',
@@ -727,7 +766,14 @@ function BeatPlayer() {
                   : { y: -5, scale: 1.02 }
               }
               transition={{
-                width: { type: 'spring', stiffness: 260, damping: 30, mass: 0.9 },
+                // A plain tween instead of a spring: springs keep
+                // simulating (and re-triggering layout on every
+                // sibling card as the row reflows) until they settle,
+                // which is where a lot of the perceived "laggy" came
+                // from. A fixed-duration tween finishes predictably
+                // and lines up with the scroll-centering animation
+                // above, which uses the same duration.
+                width: { duration: 0.45, ease: SMOOTH_EASE },
                 y: { duration: 0.35, ease: SMOOTH_EASE },
                 scale: { duration: 0.35, ease: SMOOTH_EASE },
               }}
@@ -1699,11 +1745,104 @@ function GenreShowcase() {
 /* ============================================================= */
 /* GALLERY — grid + a smooth shared-element lightbox with        */
 /* backdrop blur and prev/next navigation.                       */
+/*                                                                */
+/* The box resizes to match whichever image is currently showing */
+/* (locking it to only the first-opened image made landscape     */
+/* photos shrink to a sliver inside a tall portrait-shaped box —  */
+/* that's the "images look clipped/too small" issue). The jank    */
+/* from before wasn't the resizing itself, it was resizing via a  */
+/* bouncy spring AT THE SAME TIME as the image crossfade — two    */
+/* differently-timed animations landing at different moments.    */
+/* Now both the box resize and the image crossfade use the same   */
+/* short, no-overshoot tween so they finish together as one       */
+/* single, clean motion instead of two competing ones.            */
 /* ============================================================= */
 
 function Gallery() {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+
+  // The index of the thumbnail that was actually clicked to open the
+  // lightbox. The shared-element (layoutId) animation stays anchored
+  // to THIS index the whole time the lightbox is open, and the box's
+  // size is derived from THIS image only — never from lightboxIndex —
+  // so paging through prev/next never re-triggers the open/close
+  // grow-and-shrink animation. Only the image inside crossfades.
   const [openedIndex, setOpenedIndex] = useState<number | null>(null);
+
+  // Real dimensions of each image. Preloaded for every gallery image up
+  // front (see the effect below) so the lightbox box size is known
+  // immediately on open instead of snapping once the full-res image
+  // finishes loading.
+  const dimsRef = useRef<Record<string, { w: number; h: number }>>({});
+  const [dimsVersion, setDimsVersion] = useState(0);
+  const recordDims = useCallback(
+    (src: string) => (event: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = event.currentTarget;
+      if (!img.naturalWidth || !img.naturalHeight) return;
+      const existing = dimsRef.current[src];
+      if (existing && existing.w === img.naturalWidth && existing.h === img.naturalHeight) {
+        return;
+      }
+      dimsRef.current[src] = { w: img.naturalWidth, h: img.naturalHeight };
+      setDimsVersion((v) => v + 1);
+    },
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    galleryImages.forEach((src) => {
+      const img = new window.Image();
+      img.onload = () => {
+        if (cancelled || !img.naturalWidth || !img.naturalHeight) return;
+        const existing = dimsRef.current[src];
+        if (existing && existing.w === img.naturalWidth && existing.h === img.naturalHeight) {
+          return;
+        }
+        dimsRef.current[src] = { w: img.naturalWidth, h: img.naturalHeight };
+        setDimsVersion((v) => v + 1);
+      };
+      img.src = src;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [viewport, setViewport] = useState(() => ({
+    w: typeof window !== 'undefined' ? window.innerWidth : 1200,
+    h: typeof window !== 'undefined' ? window.innerHeight : 800,
+  }));
+
+  useEffect(() => {
+    const onResize = () =>
+      setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  // Recomputed per lightboxIndex so the box actually matches whatever
+  // photo is showing — a landscape shot gets a landscape box, a
+  // portrait shot gets a portrait box, instead of every image being
+  // squeezed into whichever shape was clicked first.
+  const lightboxBox = useMemo(() => {
+    if (lightboxIndex === null) return null;
+    const src = galleryImages[lightboxIndex];
+    const dims = dimsRef.current[src];
+    const isMobile = viewport.w < 640;
+    const maxW = Math.min(viewport.w * (isMobile ? 0.94 : 0.88), 1400);
+    const maxH = viewport.h * (isMobile ? 0.68 : 0.78);
+    const ratio = dims ? dims.w / dims.h : 1.5;
+
+    let width = maxW;
+    let height = width / ratio;
+    if (height > maxH) {
+      height = maxH;
+      width = height * ratio;
+    }
+    return { width, height };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightboxIndex, viewport, dimsVersion]);
 
   const openAt = useCallback((index: number) => {
     setOpenedIndex(index);
@@ -1712,44 +1851,30 @@ function Gallery() {
 
   const close = useCallback(() => {
     setLightboxIndex(null);
+    setOpenedIndex(null);
   }, []);
-
-  const showPrev = useCallback(() => {
-    setLightboxIndex((index) =>
-      index === null ? null : (index - 1 + galleryImages.length) % galleryImages.length
-    );
-  }, []);
-
-  const showNext = useCallback(() => {
-    setLightboxIndex((index) =>
-      index === null ? null : (index + 1) % galleryImages.length
-    );
-  }, []);
-
-  // Preload the current image plus its neighbours so Next/Previous can
-  // crossfade immediately instead of waiting for a network/decode step.
-  useEffect(() => {
-    if (lightboxIndex === null) return;
-
-    const indexes = [
-      lightboxIndex,
-      (lightboxIndex - 1 + galleryImages.length) % galleryImages.length,
-      (lightboxIndex + 1) % galleryImages.length,
-    ];
-
-    indexes.forEach((index) => {
-      const image = new window.Image();
-      image.src = galleryImages[index];
-    });
-  }, [lightboxIndex]);
+  const showPrev = useCallback(
+    () =>
+      setLightboxIndex((i) =>
+        i === null ? null : (i - 1 + galleryImages.length) % galleryImages.length
+      ),
+    []
+  );
+  const showNext = useCallback(
+    () =>
+      setLightboxIndex((i) =>
+        i === null ? null : (i + 1) % galleryImages.length
+      ),
+    []
+  );
 
   useEffect(() => {
     if (lightboxIndex === null) return;
 
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close();
-      if (event.key === 'ArrowLeft') showPrev();
-      if (event.key === 'ArrowRight') showNext();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+      if (e.key === 'ArrowLeft') showPrev();
+      if (e.key === 'ArrowRight') showNext();
     };
 
     document.addEventListener('keydown', onKey);
@@ -1761,6 +1886,26 @@ function Gallery() {
     };
   }, [lightboxIndex, close, showPrev, showNext]);
 
+  // Simple swipe support so prev/next also works on mobile without
+  // hunting for the small arrow buttons.
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: React.TouchEvent) => {
+    const t = e.touches[0];
+    touchStartRef.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: React.TouchEvent) => {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    if (!start) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+      if (dx > 0) showPrev();
+      else showNext();
+    }
+  };
+
   return (
     <div className="relative">
       <div className="columns-1 gap-4 sm:columns-2 lg:columns-3">
@@ -1769,7 +1914,6 @@ function Gallery() {
             key={src}
             type="button"
             onClick={() => openAt(index)}
-            layoutId={`gallery-image-${index}`}
             className="group mb-4 block w-full break-inside-avoid overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 text-left"
             whileHover={{ y: -4 }}
             transition={{ duration: 0.4, ease: SMOOTH_EASE }}
@@ -1778,6 +1922,7 @@ function Gallery() {
               src={src}
               alt={`Dilliboy gallery image ${index + 1}`}
               className="hover-scale-smooth block h-auto w-full object-cover"
+              onLoad={recordDims(src)}
             />
           </motion.button>
         ))}
@@ -1786,104 +1931,122 @@ function Gallery() {
       <AnimatePresence>
         {lightboxIndex !== null && openedIndex !== null && (
           <motion.div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-3 backdrop-blur-xl sm:p-4"
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-4 backdrop-blur-2xl"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.35, ease: SMOOTH_EASE }}
+            transition={{ duration: 0.3, ease: SMOOTH_EASE }}
             onClick={close}
           >
             <button
               type="button"
               onClick={close}
               aria-label="Close gallery"
-              className="absolute right-3 top-3 z-30 flex h-10 w-10 items-center justify-center rounded-full border border-white/15 bg-black/50 text-white transition-colors hover:border-white/40 sm:right-5 sm:top-5 sm:h-11 sm:w-11"
+              className="absolute right-5 top-5 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40"
             >
               ✕
             </button>
 
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
+              onClick={(e) => {
+                e.stopPropagation();
                 showPrev();
               }}
               aria-label="Previous image"
-              className="absolute left-2 top-1/2 z-30 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/50 text-xl text-white transition-colors hover:border-white/40 sm:left-4 sm:h-11 sm:w-11 md:left-6"
+              className="absolute left-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:left-6"
             >
               ‹
             </button>
 
             <button
               type="button"
-              onClick={(event) => {
-                event.stopPropagation();
+              onClick={(e) => {
+                e.stopPropagation();
                 showNext();
               }}
               aria-label="Next image"
-              className="absolute right-2 top-1/2 z-30 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/50 text-xl text-white transition-colors hover:border-white/40 sm:right-4 sm:h-11 sm:w-11 md:right-6"
+              className="absolute right-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:right-6"
             >
               ›
             </button>
 
-            {/* Stable frame: navigation only crossfades the image, so there
-                is no layout/spring resize fighting the Next button. */}
+            {/*
+              Swapped the shared-element (layoutId) "grow out of the
+              exact thumbnail" effect for a simpler centered scale+fade.
+              The grid uses a CSS multi-column masonry layout, and
+              Framer's FLIP has to measure every layoutId'd thumbnail in
+              that layout to do the shared transition — that measuring
+              is what was making the open feel janky/slow no matter how
+              the transition itself was tuned. This version has nothing
+              to measure: the box is already centered by the flex
+              backdrop below, so "expand into the centre" is just a
+              clean scale-up + fade-in on the box itself — cheap, and
+              its speed is fully controlled by the transition below.
+              `layout` (no id) is kept only so the box still resizes
+              smoothly on prev/next as lightboxBox changes — that's a
+              single element with nothing else sharing its layout group,
+              so it stays fast.
+            */}
             <motion.div
-              layoutId={`gallery-image-${openedIndex}`}
-              className="relative h-[78vh] max-h-[820px] w-[92vw] max-w-[1200px] overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 shadow-2xl shadow-black/40 sm:h-[80vh] sm:w-[90vw]"
-              transition={{
-                layout: { type: 'spring', stiffness: 180, damping: 30, mass: 0.8 },
+              layout
+              className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950"
+              style={{
+                width: lightboxBox?.width,
+                height: lightboxBox?.height,
               }}
-              onClick={(event) => event.stopPropagation()}
+              initial={{ opacity: 0, scale: 0.88 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.92 }}
+              transition={{ duration: 0.3, ease: SMOOTH_EASE }}
+              onClick={(e) => e.stopPropagation()}
+              onTouchStart={onTouchStart}
+              onTouchEnd={onTouchEnd}
             >
               <AnimatePresence initial={false} mode="sync">
-                <motion.div
+                <motion.img
                   key={lightboxIndex}
-                  className="absolute inset-0 flex items-center justify-center bg-black"
+                  src={galleryImages[lightboxIndex]}
+                  alt={`Dilliboy gallery image ${lightboxIndex + 1}`}
+                  className="absolute inset-0 h-full w-full object-contain"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.28, ease: SMOOTH_EASE }}
-                >
-                  <AssetImage
-                    src={galleryImages[lightboxIndex]}
-                    alt={`Dilliboy gallery image ${lightboxIndex + 1}`}
-                    eager
-                    className="h-full w-full object-contain"
-                  />
-                </motion.div>
+                  transition={{ duration: 0.25, ease: SMOOTH_EASE }}
+                  onLoad={recordDims(galleryImages[lightboxIndex])}
+                />
               </AnimatePresence>
-
-              <div
-                className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 gap-1.5 rounded-full border border-white/10 bg-black/55 p-1.5 backdrop-blur-xl sm:bottom-5 sm:gap-2 sm:p-2"
-                onClick={(event) => event.stopPropagation()}
-              >
-                {[-1, 0, 1].map((offset) => {
-                  const index =
-                    (lightboxIndex + offset + galleryImages.length) % galleryImages.length;
-
-                  return (
-                    <button
-                      key={`${index}-${offset}`}
-                      type="button"
-                      onClick={() => setLightboxIndex(index)}
-                      aria-label={`Show image ${index + 1}`}
-                      className={`h-9 w-12 overflow-hidden rounded-md border transition-all duration-200 sm:h-10 sm:w-14 ${
-                        offset === 0
-                          ? 'border-white opacity-100'
-                          : 'border-white/15 opacity-50 hover:opacity-80'
-                      }`}
-                    >
-                      <AssetImage
-                        src={galleryImages[index]}
-                        alt=""
-                        className="h-full w-full object-cover"
-                      />
-                    </button>
-                  );
-                })}
-              </div>
             </motion.div>
+
+            {/* filmstrip — previous / next preview */}
+            <div
+              className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {[-1, 0, 1].map((offset) => {
+                const idx =
+                  (lightboxIndex + offset + galleryImages.length) %
+                  galleryImages.length;
+                return (
+                  <button
+                    key={`${idx}-${offset}`}
+                    type="button"
+                    onClick={() => setLightboxIndex(idx)}
+                    className={`h-12 w-16 overflow-hidden rounded-lg border transition-all duration-300 ${
+                      offset === 0
+                        ? 'border-white opacity-100'
+                        : 'border-white/15 opacity-50 hover:opacity-80'
+                    }`}
+                  >
+                    <AssetImage
+                      src={galleryImages[idx]}
+                      alt=""
+                      className="h-full w-full object-cover"
+                    />
+                  </button>
+                );
+              })}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -2105,12 +2268,32 @@ function SpotifyIcon({ className = '' }: { className?: string }) {
   );
 }
 
+function MenuIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <line x1="4" y1="7" x2="20" y2="7" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="17" x2="20" y2="17" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <line x1="5" y1="5" x2="19" y2="19" />
+      <line x1="19" y1="5" x2="5" y2="19" />
+    </svg>
+  );
+}
+
 /* ============================================================= */
 /* PAGE                                                            */
 /* ============================================================= */
 
 export default function Home() {
   const [scrolled, setScrolled] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
@@ -2119,8 +2302,22 @@ export default function Home() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  // Lock body scroll while the mobile menu is open, same treatment as
+  // the gallery lightbox.
+  useEffect(() => {
+    document.body.style.overflow = mobileMenuOpen ? 'hidden' : '';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, [mobileMenuOpen]);
+
   const scrollToSection = (id: string) => {
-    smoothScrollToId(id);
+    setMobileMenuOpen(false);
+    // Close the menu first, then kick off the scroll on the next frame
+    // so the layout settles (menu panel unmounting) before we measure
+    // the target section's position — otherwise the offset can be
+    // calculated against the pre-close layout and land slightly off.
+    requestAnimationFrame(() => smoothScrollToId(id));
   };
 
   const navItems: [string, string][] = [
@@ -2196,8 +2393,64 @@ export default function Home() {
             >
               Let's Work
             </button>
+
+            {/*
+              Mobile nav trigger. Previously the nav links were
+              `hidden md:flex` and the "Let's Work" CTA was
+              `hidden sm:block`, which meant phone visitors (below the
+              sm breakpoint) had literally no way to jump to a section
+              other than manually scrolling — the whole nav bar was
+              invisible to them. This button + panel restores that
+              navigation on small screens.
+            */}
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen((v) => !v)}
+              aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+              aria-expanded={mobileMenuOpen}
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-white/15 text-white md:hidden"
+            >
+              {mobileMenuOpen ? (
+                <CloseIcon className="h-4 w-4" />
+              ) : (
+                <MenuIcon className="h-4 w-4" />
+              )}
+            </button>
           </div>
         </div>
+
+        <AnimatePresence>
+          {mobileMenuOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.32, ease: SMOOTH_EASE }}
+              className="overflow-hidden border-b border-white/10 bg-black/95 backdrop-blur-2xl md:hidden"
+            >
+              <div className="flex flex-col px-4 py-4 sm:px-6">
+                {navItems.map(([id, label]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => scrollToSection(id)}
+                    className="border-b border-white/5 py-4 text-left text-sm font-semibold uppercase tracking-[0.18em] text-zinc-300 transition-colors last:border-b-0 hover:text-white active:text-yellow-400"
+                  >
+                    {label}
+                  </button>
+                ))}
+
+                <button
+                  type="button"
+                  onClick={() => scrollToSection('contact')}
+                  className="mt-5 rounded-full border border-white/20 bg-white px-4 py-3 text-center text-xs font-bold uppercase tracking-[0.2em] text-black"
+                >
+                  Let's Work
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </nav>
 
       <section
@@ -2217,7 +2470,17 @@ export default function Home() {
             Music Producer · DJ · Sound Designer
           </p>
 
-          <h1 className="text-[18vw] font-black leading-[0.75] tracking-[-0.025em] md:text-[12rem]">
+          {/*
+            clamp() instead of a bare 18vw: on very narrow phones 18vw
+            of an 8-letter word can crowd the safe-area edges, and on
+            very wide desktop screens 18vw runs away to an oversized
+            wordmark. clamp gives a sane floor/ceiling while still
+            scaling fluidly with the viewport in between.
+          */}
+          <h1
+            className="font-black leading-[0.75] tracking-[-0.025em]"
+            style={{ fontSize: 'clamp(3.2rem, 18vw, 12rem)' }}
+          >
             DILLIBOY
           </h1>
 
@@ -2229,7 +2492,7 @@ export default function Home() {
             <button
               type="button"
               onClick={() => scrollToSection('music')}
-              className="min-h-12 bg-white px-8 py-4 text-xs font-bold uppercase tracking-[0.2em] text-black transition-all hover:bg-yellow-400"
+              className="bg-white px-8 py-4 text-xs font-bold uppercase tracking-[0.2em] text-black transition-all hover:bg-yellow-400"
             >
               Listen to Beats
             </button>
@@ -2237,7 +2500,7 @@ export default function Home() {
             <button
               type="button"
               onClick={() => scrollToSection('contact')}
-              className="min-h-12 border border-white/20 px-8 py-4 text-xs font-bold uppercase tracking-[0.2em] transition-all hover:border-white hover:bg-white/5"
+              className="border border-white/20 px-8 py-4 text-xs font-bold uppercase tracking-[0.2em] transition-all hover:border-white hover:bg-white/5"
             >
               Get in Touch
             </button>
