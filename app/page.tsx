@@ -1,6 +1,15 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  Component,
+  type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 import { motion, AnimatePresence, useMotionValue, useSpring } from 'motion/react';
 
 interface Beat {
@@ -195,10 +204,11 @@ const SMOOTH_EASE: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
 /* ============================================================= */
 /* SMOOTH SCROLL — a single, self-cancelling, eased scroll        */
-/* driver used by the nav and every "jump to section" button so   */
-/* every one of them feels identical and never fights the         */
-/* browser's own (inconsistent, per-browser) native smooth        */
-/* scrolling implementation.                                      */
+/* driver used by the nav, the hero buttons, and the scroll-to-   */
+/* top button so every one of them feels identical and never      */
+/* fights the browser's own (inconsistent, per-browser) native    */
+/* smooth scrolling implementation. Passing offset 0 and no id     */
+/* scrolls straight to the very top (see scrollToTop below).       */
 /* ============================================================= */
 let scrollAnimationToken = 0;
 
@@ -206,31 +216,21 @@ function easeOutExpo(t: number) {
   return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
 }
 
-function smoothScrollToId(id: string, offset = 84, duration = 900) {
-  const element = document.getElementById(id);
-  if (!element) return;
-
+function smoothScrollToY(targetY: number, duration = 900) {
   const prefersReduced =
     typeof window !== 'undefined' &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  const getTargetY = () =>
-    element.getBoundingClientRect().top + window.scrollY - offset;
-
   if (prefersReduced) {
-    window.scrollTo({ top: getTargetY() });
+    window.scrollTo({ top: targetY });
     return;
   }
 
   const token = ++scrollAnimationToken;
   const startY = window.scrollY;
-  const targetY = getTargetY();
   const distance = targetY - startY;
   const startTime = performance.now();
 
-  // If the person grabs the page mid-flight (wheel/touch/keyboard), the
-  // animation backs off immediately instead of fighting their input —
-  // that fight is exactly what reads as "stiff" or "janky".
   const cancel = () => {
     scrollAnimationToken += 1;
   };
@@ -254,6 +254,76 @@ function smoothScrollToId(id: string, offset = 84, duration = 900) {
   };
 
   requestAnimationFrame(step);
+}
+
+function smoothScrollToId(id: string, offset = 84, duration = 900) {
+  const element = document.getElementById(id);
+  if (!element) return;
+  const targetY = element.getBoundingClientRect().top + window.scrollY - offset;
+  smoothScrollToY(targetY, duration);
+}
+
+/* ============================================================= */
+/* ERROR LOGGING — a single funnel for anything that goes wrong   */
+/* client-side (failed audio loads, image fallbacks exhausted,    */
+/* render crashes). Every catch block in this file reports        */
+/* through here instead of calling console.error directly, so     */
+/* wiring in a real error-tracking service (Sentry, LogRocket,     */
+/* Bugsnag, etc.) later is a one-line change in ONE place instead  */
+/* of hunting down every try/catch in the file — swap the body of  */
+/* this function for e.g. Sentry.captureException(error, { tags:   */
+/* { scope } }) once that service is set up.                       */
+/* ============================================================= */
+function logError(scope: string, error: unknown) {
+  // eslint-disable-next-line no-console
+  console.error(`[Dilliboy:${scope}]`, error);
+}
+
+/* ============================================================= */
+/* ERROR BOUNDARY — catches render-time crashes in whichever       */
+/* section it wraps and shows a small recovery UI there instead    */
+/* of taking the whole page down to a blank screen. Each major      */
+/* section below is wrapped individually, so one broken section     */
+/* (say, a bad API response reaching a component) can't take out    */
+/* the rest of the page with it.                                    */
+/* ============================================================= */
+class ErrorBoundary extends Component<
+  { children: ReactNode; label: string },
+  { hasError: boolean }
+> {
+  constructor(props: { children: ReactNode; label: string }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    logError(`ErrorBoundary:${this.props.label}`, error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-3 px-4 py-16 text-center">
+          <p className="text-sm text-zinc-500">
+            This section couldn&apos;t load. The rest of the page is
+            unaffected.
+          </p>
+          <button
+            type="button"
+            onClick={() => this.setState({ hasError: false })}
+            className="rounded-full border border-white/15 px-4 py-2 text-xs font-bold uppercase tracking-[0.2em] text-white transition-colors hover:border-white/40"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 /* ============================================================= */
@@ -294,20 +364,30 @@ function GlobalStyles() {
 
       .hover-scale-smooth {
         transition: transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
-        will-change: transform;
         transform: translateZ(0) scale(1);
         backface-visibility: hidden;
       }
       .group:hover .hover-scale-smooth {
+        /*
+          will-change only while actually hovered, not permanently. A
+          permanent will-change on every thumbnail/track image (30+
+          elements across the page) forces the browser to keep that
+          many separate GPU compositor layers alive at all times,
+          which is a real, ongoing cost while scrolling — not just
+          during the hover transition itself. Scoped to :hover, the
+          browser only pays for a layer on the handful of images
+          actually being interacted with.
+        */
+        will-change: transform;
         transform: translateZ(0) scale(1.06);
       }
       .hover-scale-smooth-lg {
         transition: transform 1100ms cubic-bezier(0.16, 1, 0.3, 1);
-        will-change: transform;
         transform: translateZ(0) scale(1);
         backface-visibility: hidden;
       }
       .group:hover .hover-scale-smooth-lg {
+        will-change: transform;
         transform: translateZ(0) scale(1.1);
       }
 
@@ -374,6 +454,23 @@ function GlobalStyles() {
         scroll-margin-top: 84px;
       }
 
+      /*
+        Every section below the hero was rendering (and, for the beat
+        cards' flowing gradients and the genre bubbles, continuously
+        animating) at all times, whether or not it was anywhere near
+        the viewport — that's a big chunk of "why does scrolling lag".
+        content-visibility: auto tells the browser to skip layout/paint
+        for a section entirely while it's off-screen, and do it again
+        automatically once it's about to be scrolled into view.
+        contain-intrinsic-size gives it a placeholder height to reserve
+        so the scrollbar/scroll position don't jump around while a
+        section is skipped.
+      */
+      .cv-section {
+        content-visibility: auto;
+        contain-intrinsic-size: 0 900px;
+      }
+
       @keyframes fountain-up {
         from {
           transform: translate3d(0, 0, 0);
@@ -389,6 +486,27 @@ function GlobalStyles() {
         to {
           transform: translate3d(0, 0, 0);
         }
+      }
+
+      /*
+        Belt-and-suspenders alongside content-visibility above: this
+        class is toggled by an IntersectionObserver in HeroSideFlow so
+        the two looping image columns actually stop animating (not
+        just stop being painted) once you've scrolled well past the
+        hero, instead of quietly running in the background for the
+        rest of the session.
+      */
+      .fountain-paused {
+        animation-play-state: paused !important;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .spin {
+        animation: spin 0.8s linear infinite;
       }
 
       /*
@@ -443,6 +561,8 @@ function AssetImage({
 
     if (next) {
       setSource(next);
+    } else {
+      logError('AssetImage', `all sources failed for ${src}`);
     }
   };
 
@@ -462,12 +582,17 @@ function AssetImage({
 /* ============================================================= */
 /* BEAT PLAYER — consolidated state via a small hook, side-by-   */
 /* side scrollable cards, reactive hover, flowing ASMR gradient  */
-/* on the active card.                                           */
+/* on the active card. Now also tracks loading/error state per    */
+/* the audio element, since a bad network request or a missing    */
+/* file used to fail completely silently (a console.error and     */
+/* nothing else visible on the card).                              */
 /* ============================================================= */
 
 interface BeatPlayerState {
   currentBeatId: string | null;
   isPlaying: boolean;
+  isLoading: boolean;
+  error: string | null;
   progress: number;
   duration: number;
 }
@@ -477,6 +602,8 @@ function useBeatPlayer(beatList: Beat[]) {
   const [state, setState] = useState<BeatPlayerState>({
     currentBeatId: null,
     isPlaying: false,
+    isLoading: false,
+    error: null,
     progress: 0,
     duration: 0,
   });
@@ -485,29 +612,52 @@ function useBeatPlayer(beatList: Beat[]) {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const onPlay = () => setState((s) => ({ ...s, isPlaying: true }));
+    const onPlay = () => setState((s) => ({ ...s, isPlaying: true, isLoading: false }));
     const onPause = () => setState((s) => ({ ...s, isPlaying: false }));
+    const onWaiting = () => setState((s) => ({ ...s, isLoading: true }));
+    const onCanPlay = () => setState((s) => ({ ...s, isLoading: false }));
     const onTimeUpdate = () =>
       setState((s) => ({ ...s, progress: audio.currentTime }));
     const onMeta = () =>
       setState((s) => ({ ...s, duration: audio.duration || 0 }));
     const onEnded = () =>
       setState((s) => ({ ...s, isPlaying: false, progress: 0 }));
+    // The <audio> element's own 'error' event fires for bad URLs,
+    // network failures, or unsupported files — cases that never
+    // reach the .play() try/catch below because playback was never
+    // the thing that failed. Without listening for this, those
+    // failures were silent: the card just sat there looking like it
+    // was still loading, forever.
+    const onError = () => {
+      logError('BeatPlayer:audio', audio.error);
+      setState((s) => ({
+        ...s,
+        isPlaying: false,
+        isLoading: false,
+        error: 'Could not load this beat.',
+      }));
+    };
 
     audio.addEventListener('play', onPlay);
     audio.addEventListener('pause', onPause);
+    audio.addEventListener('waiting', onWaiting);
+    audio.addEventListener('canplay', onCanPlay);
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('loadedmetadata', onMeta);
     audio.addEventListener('durationchange', onMeta);
     audio.addEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
 
     return () => {
       audio.removeEventListener('play', onPlay);
       audio.removeEventListener('pause', onPause);
+      audio.removeEventListener('waiting', onWaiting);
+      audio.removeEventListener('canplay', onCanPlay);
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('loadedmetadata', onMeta);
       audio.removeEventListener('durationchange', onMeta);
       audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
     };
   }, []);
 
@@ -516,14 +666,15 @@ function useBeatPlayer(beatList: Beat[]) {
       const audio = audioRef.current;
       if (!audio) return;
 
-      if (state.currentBeatId === beatId) {
+      if (state.currentBeatId === beatId && !state.error) {
         if (state.isPlaying) {
           audio.pause();
         } else {
           try {
             await audio.play();
           } catch (error) {
-            console.error('Playback failed:', error);
+            logError('BeatPlayer:play', error);
+            setState((s) => ({ ...s, isPlaying: false, error: 'Playback failed. Tap to retry.' }));
           }
         }
         return;
@@ -536,6 +687,8 @@ function useBeatPlayer(beatList: Beat[]) {
       setState({
         currentBeatId: beatId,
         isPlaying: false,
+        isLoading: true,
+        error: null,
         progress: 0,
         duration: 0,
       });
@@ -546,11 +699,16 @@ function useBeatPlayer(beatList: Beat[]) {
       try {
         await audio.play();
       } catch (error) {
-        console.error('Playback failed:', error);
-        setState((s) => ({ ...s, isPlaying: false }));
+        logError('BeatPlayer:play', error);
+        setState((s) => ({
+          ...s,
+          isPlaying: false,
+          isLoading: false,
+          error: 'Playback failed. Tap to retry.',
+        }));
       }
     },
-    [beatList, state.currentBeatId, state.isPlaying]
+    [beatList, state.currentBeatId, state.isPlaying, state.error]
   );
 
   const seek = useCallback((time: number) => {
@@ -582,7 +740,7 @@ const beatGlowColors = ['#64748b', '#6366f1', '#06b6d4', '#d946ef', '#f59e0b'];
 
 function BeatPlayer() {
   const { audioRef, state, select, seek } = useBeatPlayer(beats);
-  const { currentBeatId, isPlaying, progress, duration } = state;
+  const { currentBeatId, isPlaying, isLoading, error, progress, duration } = state;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -749,6 +907,8 @@ function BeatPlayer() {
       >
         {beats.map((beat, index) => {
           const isActive = currentBeatId === beat.id;
+          const showLoading = isActive && isLoading && !error;
+          const showError = isActive && !!error;
 
           return (
             <motion.div
@@ -921,25 +1081,58 @@ function BeatPlayer() {
                   <h3 className="w-full overflow-hidden text-ellipsis whitespace-nowrap text-2xl font-medium tracking-[-0.025em] text-white sm:text-3xl md:text-5xl">
                     {beat.name}
                   </h3>
-                  <motion.p
-                    className="mt-2 text-xs uppercase tracking-[0.3em] text-white/50"
-                    animate={{ opacity: isActive ? 1 : 0, y: isActive ? 0 : 5 }}
-                    transition={{ duration: 0.35, delay: 0.2, ease: SMOOTH_EASE }}
-                  >
-                    DILLIBOY
-                  </motion.p>
+                  {showError ? (
+                    <p className="mt-2 text-xs font-medium uppercase tracking-[0.2em] text-red-400">
+                      {error}
+                    </p>
+                  ) : (
+                    <motion.p
+                      className="mt-2 text-xs uppercase tracking-[0.3em] text-white/50"
+                      animate={{ opacity: isActive ? 1 : 0, y: isActive ? 0 : 5 }}
+                      transition={{ duration: 0.35, delay: 0.2, ease: SMOOTH_EASE }}
+                    >
+                      DILLIBOY
+                    </motion.p>
+                  )}
                 </motion.div>
 
                 <motion.button
                   type="button"
                   onClick={() => select(beat.id)}
-                  aria-label={isPlaying ? `Pause ${beat.name}` : `Play ${beat.name}`}
-                  className="absolute bottom-6 left-6 z-40 flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-white text-black shadow-lg shadow-black/20"
+                  aria-label={
+                    showError
+                      ? 'Retry'
+                      : isPlaying
+                        ? `Pause ${beat.name}`
+                        : `Play ${beat.name}`
+                  }
+                  className={`absolute bottom-6 left-6 z-40 flex h-12 w-12 shrink-0 items-center justify-center rounded-full shadow-lg shadow-black/20 ${
+                    showError ? 'bg-red-500 text-white' : 'bg-white text-black'
+                  }`}
                   whileHover={{ scale: 1.08 }}
                   whileTap={{ scale: 0.92 }}
                   transition={{ duration: 0.25, ease: SMOOTH_EASE }}
                 >
-                  {isPlaying ? (
+                  {showLoading ? (
+                    <svg viewBox="0 0 24 24" className="spin h-4 w-4">
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeDasharray="42"
+                        strokeDashoffset="14"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  ) : showError ? (
+                    <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <polyline points="1 4 1 10 7 10" />
+                      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                    </svg>
+                  ) : isPlaying ? (
                     <div className="flex items-center gap-[3px]">
                       <span className="h-4 w-[2px] rounded-full bg-black" />
                       <span className="h-4 w-[2px] rounded-full bg-black" />
@@ -1263,6 +1456,29 @@ const bubbleGradients = [
   'radial-gradient(circle at 30% 28%, #ffffff 0%, #f1fff4 38%, #d4ffe0 100%)',
 ];
 
+// Font size for a bubble's label, keyed off how long the word is AND
+// whether the bubble is currently at the compact (mobile) radius.
+// Previously every bubble under 13 characters used a single 9px size
+// no matter how tight the circle actually was on a phone-sized bubble
+// (radius as low as 24px) — a 9-letter word like "Synthwave" simply
+// didn't fit on one line at that size, and because the bubble clips
+// its contents (`overflow-hidden`, to keep the circle shape), the
+// overflowing tail was silently cut off instead of wrapping. This
+// tiers the size down further for longer words specifically on
+// compact bubbles, and `break-words` below lets a word that still
+// doesn't fit wrap onto a second line instead of being clipped.
+function bubbleLabelSizeClass(name: string, isCompact: boolean) {
+  const len = name.length;
+  if (isCompact) {
+    if (len > 9) return 'text-[7px]';
+    if (len > 6) return 'text-[8px]';
+    return 'text-[9px]';
+  }
+  if (len > 13) return 'text-[9px]';
+  if (len > 9) return 'text-[10px]';
+  return 'text-[11px]';
+}
+
 function GenreShowcase() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const bubbleRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -1285,6 +1501,9 @@ function GenreShowcase() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [selectedGenre, setSelectedGenre] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+  const [isCompact, setIsCompact] = useState(false);
+  const [genreLoading, setGenreLoading] = useState(false);
+  const [genreError, setGenreError] = useState<string | null>(null);
 
   // This physics simulation used to run every frame for the entire
   // page's lifetime (it mounts once and never unmounts), burning CPU
@@ -1299,7 +1518,8 @@ function GenreShowcase() {
     if (!container) return;
 
     const { width, height } = container.getBoundingClientRect();
-    const isCompact = width < 640;
+    const compact = width < 640;
+    setIsCompact(compact);
 
     // Size bubbles off the actual container area and how many genres
     // need to fit, instead of a fixed ratio of width — that's what was
@@ -1308,8 +1528,8 @@ function GenreShowcase() {
     const packingFactor = 0.5;
     const idealArea = (width * height * packingFactor) / genres.length;
     const idealRadius = Math.sqrt(idealArea / Math.PI);
-    const baseRadius = isCompact
-      ? Math.max(24, Math.min(38, idealRadius))
+    const baseRadius = compact
+      ? Math.max(26, Math.min(40, idealRadius))
       : Math.max(32, Math.min(54, idealRadius));
 
     // Built with a plain loop (not .map) because each new bubble's
@@ -1319,7 +1539,13 @@ function GenreShowcase() {
     const next: BubblePhysics[] = [];
 
     genres.forEach((genre) => {
-      const r = baseRadius + ((genre.name.length > 10 ? 4 : 0) - (isCompact ? 2 : 0));
+      // Long single-word genre names (Synthwave, Experimental) get a
+      // slightly larger radius on compact screens too, not just a
+      // smaller font — a bit more room in the circle itself, on top
+      // of the tiered font sizing below, is what actually stops the
+      // longest names from needing to wrap at all in most cases.
+      const lengthBonus = genre.name.length > 9 ? (compact ? 5 : 4) : genre.name.length > 6 ? 2 : 0;
+      const r = baseRadius + lengthBonus - (compact ? 2 : 0);
       let x = 0;
       let y = 0;
       let attempts = 0;
@@ -1337,7 +1563,7 @@ function GenreShowcase() {
       );
 
       const angle = Math.random() * Math.PI * 2;
-      const speed = isCompact ? 0.12 : 0.18;
+      const speed = compact ? 0.12 : 0.18;
 
       next.push({
         x,
@@ -1536,13 +1762,18 @@ function GenreShowcase() {
     audio.pause();
     audio.currentTime = 0;
     setSelectedGenre(genreName);
+    setGenreLoading(true);
+    setGenreError(null);
     audio.src = `/genre-showcase/${encodeURIComponent(`${genreName}.mp3`)}`;
     audio.load();
 
     try {
       await audio.play();
+      setGenreLoading(false);
     } catch (error) {
-      console.error('Genre playback failed:', error);
+      logError('GenreShowcase:play', error);
+      setGenreLoading(false);
+      setGenreError('Playback failed');
     }
   }, [selectedGenre]);
 
@@ -1550,8 +1781,17 @@ function GenreShowcase() {
     const audio = audioRef.current;
     if (!audio) return;
     const onEnded = () => setSelectedGenre(null);
+    const onError = () => {
+      logError('GenreShowcase:audio', audio.error);
+      setGenreLoading(false);
+      setGenreError('Could not load this sound');
+    };
     audio.addEventListener('ended', onEnded);
-    return () => audio.removeEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
+    return () => {
+      audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
+    };
   }, []);
 
   const handlePointerDown = (
@@ -1705,9 +1945,7 @@ function GenreShowcase() {
                     }}
                   />
                   <span
-                    className={`relative max-w-[78%] text-[9px] font-bold uppercase leading-[1.05] tracking-[-0.02em] text-black md:text-[10px] ${
-                      genre.name.length > 13 ? 'md:text-[9px]' : ''
-                    }`}
+                    className={`relative max-w-[82%] break-words text-center font-bold uppercase leading-[1.05] tracking-[-0.02em] text-black ${bubbleLabelSizeClass(genre.name, isCompact)}`}
                   >
                     {genre.name}
                   </span>
@@ -1726,12 +1964,18 @@ function GenreShowcase() {
               className="absolute bottom-6 left-1/2 z-40 -translate-x-1/2"
             >
               <div className="flex items-center gap-3 rounded-full border border-white/10 bg-black/70 px-5 py-3 backdrop-blur-xl">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-yellow-400" />
+                {genreError ? (
+                  <span className="h-2 w-2 rounded-full bg-red-400" />
+                ) : (
+                  <span
+                    className={`h-2 w-2 rounded-full bg-yellow-400 ${genreLoading ? '' : 'animate-pulse'}`}
+                  />
+                )}
                 <span className="text-[10px] font-medium uppercase tracking-[0.25em] text-white">
                   {selectedGenre}
                 </span>
                 <span className="text-[9px] uppercase tracking-[0.18em] text-white/35">
-                  Playing
+                  {genreError ? genreError : genreLoading ? 'Loading' : 'Playing'}
                 </span>
               </div>
             </motion.div>
@@ -1745,34 +1989,37 @@ function GenreShowcase() {
 /* ============================================================= */
 /* GALLERY — grid + a smooth shared-element lightbox with        */
 /* backdrop blur and prev/next navigation.                       */
-/*                                                                */
-/* The box resizes to match whichever image is currently showing */
-/* (locking it to only the first-opened image made landscape     */
-/* photos shrink to a sliver inside a tall portrait-shaped box —  */
-/* that's the "images look clipped/too small" issue). The jank    */
-/* from before wasn't the resizing itself, it was resizing via a  */
-/* bouncy spring AT THE SAME TIME as the image crossfade — two    */
-/* differently-timed animations landing at different moments.    */
-/* Now both the box resize and the image crossfade use the same   */
-/* short, no-overshoot tween so they finish together as one       */
-/* single, clean motion instead of two competing ones.            */
 /* ============================================================= */
 
 function Gallery() {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
+  // The lightbox overlay is portaled straight to document.body (see the
+  // return statement below) instead of rendering inline inside this
+  // section. The gallery section has `content-visibility: auto` on it
+  // for scroll performance, and content-visibility implicitly applies
+  // CSS containment (`contain: layout paint`) to the section — which,
+  // same as `transform` or `filter`, makes that section a containing
+  // block for any `position: fixed` descendant. That silently broke
+  // the lightbox before: instead of covering the viewport, it
+  // positioned itself relative to the gallery section, opening pinned
+  // near the bottom of the page instead of centered on screen.
+  // Portaling it to <body> sidesteps any ancestor's containment
+  // entirely, so it's always positioned relative to the real viewport.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+
   // The index of the thumbnail that was actually clicked to open the
-  // lightbox. The shared-element (layoutId) animation stays anchored
-  // to THIS index the whole time the lightbox is open, and the box's
-  // size is derived from THIS image only — never from lightboxIndex —
-  // so paging through prev/next never re-triggers the open/close
-  // grow-and-shrink animation. Only the image inside crossfades.
+  // lightbox.
   const [openedIndex, setOpenedIndex] = useState<number | null>(null);
 
-  // Real dimensions of each image. Preloaded for every gallery image up
-  // front (see the effect below) so the lightbox box size is known
-  // immediately on open instead of snapping once the full-res image
-  // finishes loading.
+  // Real dimensions of each image, used to size the lightbox box to
+  // match each photo's real aspect ratio. Populated by each
+  // thumbnail's own onLoad below (they're loading="lazy", so this
+  // fires naturally as a thumbnail scrolls into view) rather than by
+  // eagerly fetching all 11 full-resolution photos on page load,
+  // which used to happen here and was a real chunk of unnecessary
+  // initial page weight.
   const dimsRef = useRef<Record<string, { w: number; h: number }>>({});
   const [dimsVersion, setDimsVersion] = useState(0);
   const recordDims = useCallback(
@@ -1788,26 +2035,6 @@ function Gallery() {
     },
     []
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    galleryImages.forEach((src) => {
-      const img = new window.Image();
-      img.onload = () => {
-        if (cancelled || !img.naturalWidth || !img.naturalHeight) return;
-        const existing = dimsRef.current[src];
-        if (existing && existing.w === img.naturalWidth && existing.h === img.naturalHeight) {
-          return;
-        }
-        dimsRef.current[src] = { w: img.naturalWidth, h: img.naturalHeight };
-        setDimsVersion((v) => v + 1);
-      };
-      img.src = src;
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const [viewport, setViewport] = useState(() => ({
     w: typeof window !== 'undefined' ? window.innerWidth : 1200,
@@ -1928,128 +2155,115 @@ function Gallery() {
         ))}
       </div>
 
-      <AnimatePresence>
-        {lightboxIndex !== null && openedIndex !== null && (
-          <motion.div
-            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-4 backdrop-blur-2xl"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.3, ease: SMOOTH_EASE }}
-            onClick={close}
-          >
-            <button
-              type="button"
-              onClick={close}
-              aria-label="Close gallery"
-              className="absolute right-5 top-5 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40"
-            >
-              ✕
-            </button>
+      {mounted &&
+        createPortal(
+          <AnimatePresence>
+            {lightboxIndex !== null && openedIndex !== null && (
+              <motion.div
+                className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-4 backdrop-blur-2xl"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3, ease: SMOOTH_EASE }}
+                onClick={close}
+              >
+                <button
+                  type="button"
+                  onClick={close}
+                  aria-label="Close gallery"
+                  className="absolute right-5 top-5 z-10 flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40"
+                >
+                  ✕
+                </button>
 
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                showPrev();
-              }}
-              aria-label="Previous image"
-              className="absolute left-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:left-6"
-            >
-              ‹
-            </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    showPrev();
+                  }}
+                  aria-label="Previous image"
+                  className="absolute left-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:left-6"
+                >
+                  ‹
+                </button>
 
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                showNext();
-              }}
-              aria-label="Next image"
-              className="absolute right-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:right-6"
-            >
-              ›
-            </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    showNext();
+                  }}
+                  aria-label="Next image"
+                  className="absolute right-3 top-1/2 z-10 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/40 text-white transition-colors hover:border-white/40 md:right-6"
+                >
+                  ›
+                </button>
 
-            {/*
-              Swapped the shared-element (layoutId) "grow out of the
-              exact thumbnail" effect for a simpler centered scale+fade.
-              The grid uses a CSS multi-column masonry layout, and
-              Framer's FLIP has to measure every layoutId'd thumbnail in
-              that layout to do the shared transition — that measuring
-              is what was making the open feel janky/slow no matter how
-              the transition itself was tuned. This version has nothing
-              to measure: the box is already centered by the flex
-              backdrop below, so "expand into the centre" is just a
-              clean scale-up + fade-in on the box itself — cheap, and
-              its speed is fully controlled by the transition below.
-              `layout` (no id) is kept only so the box still resizes
-              smoothly on prev/next as lightboxBox changes — that's a
-              single element with nothing else sharing its layout group,
-              so it stays fast.
-            */}
-            <motion.div
-              layout
-              className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950"
-              style={{
-                width: lightboxBox?.width,
-                height: lightboxBox?.height,
-              }}
-              initial={{ opacity: 0, scale: 0.88 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.92 }}
-              transition={{ duration: 0.3, ease: SMOOTH_EASE }}
-              onClick={(e) => e.stopPropagation()}
-              onTouchStart={onTouchStart}
-              onTouchEnd={onTouchEnd}
-            >
-              <AnimatePresence initial={false} mode="sync">
-                <motion.img
-                  key={lightboxIndex}
-                  src={galleryImages[lightboxIndex]}
-                  alt={`Dilliboy gallery image ${lightboxIndex + 1}`}
-                  className="absolute inset-0 h-full w-full object-contain"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.25, ease: SMOOTH_EASE }}
-                  onLoad={recordDims(galleryImages[lightboxIndex])}
-                />
-              </AnimatePresence>
-            </motion.div>
-
-            {/* filmstrip — previous / next preview */}
-            <div
-              className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-2"
-              onClick={(e) => e.stopPropagation()}
-            >
-              {[-1, 0, 1].map((offset) => {
-                const idx =
-                  (lightboxIndex + offset + galleryImages.length) %
-                  galleryImages.length;
-                return (
-                  <button
-                    key={`${idx}-${offset}`}
-                    type="button"
-                    onClick={() => setLightboxIndex(idx)}
-                    className={`h-12 w-16 overflow-hidden rounded-lg border transition-all duration-300 ${
-                      offset === 0
-                        ? 'border-white opacity-100'
-                        : 'border-white/15 opacity-50 hover:opacity-80'
-                    }`}
-                  >
-                    <AssetImage
-                      src={galleryImages[idx]}
-                      alt=""
-                      className="h-full w-full object-cover"
+                <motion.div
+                  layout
+                  className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950"
+                  style={{
+                    width: lightboxBox?.width,
+                    height: lightboxBox?.height,
+                  }}
+                  initial={{ opacity: 0, scale: 0.88 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.92 }}
+                  transition={{ duration: 0.3, ease: SMOOTH_EASE }}
+                  onClick={(e) => e.stopPropagation()}
+                  onTouchStart={onTouchStart}
+                  onTouchEnd={onTouchEnd}
+                >
+                  <AnimatePresence initial={false} mode="sync">
+                    <motion.img
+                      key={lightboxIndex}
+                      src={galleryImages[lightboxIndex]}
+                      alt={`Dilliboy gallery image ${lightboxIndex + 1}`}
+                      className="absolute inset-0 h-full w-full object-contain"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.25, ease: SMOOTH_EASE }}
+                      onLoad={recordDims(galleryImages[lightboxIndex])}
                     />
-                  </button>
-                );
-              })}
-            </div>
-          </motion.div>
+                  </AnimatePresence>
+                </motion.div>
+
+                {/* filmstrip — previous / next preview */}
+                <div
+                  className="absolute bottom-6 left-1/2 z-10 flex -translate-x-1/2 gap-2"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {[-1, 0, 1].map((offset) => {
+                    const idx =
+                      (lightboxIndex + offset + galleryImages.length) %
+                      galleryImages.length;
+                    return (
+                      <button
+                        key={`${idx}-${offset}`}
+                        type="button"
+                        onClick={() => setLightboxIndex(idx)}
+                        className={`h-12 w-16 overflow-hidden rounded-lg border transition-all duration-300 ${
+                          offset === 0
+                            ? 'border-white opacity-100'
+                            : 'border-white/15 opacity-50 hover:opacity-80'
+                        }`}
+                      >
+                        <AssetImage
+                          src={galleryImages[idx]}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>,
+          document.body
         )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -2066,10 +2280,31 @@ function HeroSideFlow() {
     []
   );
 
+  // These two columns loop forever via a pure CSS animation, which
+  // used to keep running for the entire session even after you'd
+  // scrolled three screens past the hero — a small but permanent,
+  // pointless animation cost sitting in the background of every
+  // other section. An IntersectionObserver just flips a class that
+  // pauses the animation once the hero itself is off-screen, and
+  // un-pauses it if you scroll back up.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [inView, setInView] = useState(true);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const io = new IntersectionObserver(
+      ([entry]) => setInView(entry.isIntersecting),
+      { threshold: 0 }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
   const renderColumn = (images: string[], direction: 'up' | 'down') => (
     <div className="relative h-full w-full overflow-hidden [mask-image:linear-gradient(to_bottom,transparent,black_18%,black_82%,transparent)]">
       <div
-        className="flex flex-col gap-4"
+        className={`flex flex-col gap-4 ${inView ? '' : 'fountain-paused'}`}
         style={{
           animation: `${direction === 'up' ? 'fountain-up' : 'fountain-down'} 26s linear infinite`,
         }}
@@ -2091,7 +2326,10 @@ function HeroSideFlow() {
   );
 
   return (
-    <div className="pointer-events-none absolute inset-0 hidden opacity-[0.16] blur-[1px] md:block">
+    <div
+      ref={rootRef}
+      className="pointer-events-none absolute inset-0 hidden opacity-[0.16] blur-[1px] md:block"
+    >
       <div className="absolute bottom-8 left-4 top-8 w-16 lg:left-10 lg:w-20">
         {renderColumn(leftImages, 'up')}
       </div>
@@ -2247,7 +2485,7 @@ function CustomCursor() {
 }
 
 /* ============================================================= */
-/* NAV ICONS                                                      */
+/* ICONS                                                           */
 /* ============================================================= */
 
 function InstagramIcon({ className = '' }: { className?: string }) {
@@ -2284,6 +2522,54 @@ function CloseIcon({ className = '' }: { className?: string }) {
       <line x1="5" y1="5" x2="19" y2="19" />
       <line x1="19" y1="5" x2="5" y2="19" />
     </svg>
+  );
+}
+
+function ArrowUpIcon({ className = '' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="19" x2="12" y2="5" />
+      <polyline points="5 12 12 5 19 12" />
+    </svg>
+  );
+}
+
+/* ============================================================= */
+/* SCROLL TO TOP — appears once you've scrolled roughly a screen  */
+/* past the top, and drives the same eased scroll used everywhere */
+/* else on the page so it doesn't feel like a different, bolted-on */
+/* interaction.                                                    */
+/* ============================================================= */
+
+function ScrollToTopButton() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setVisible(window.scrollY > window.innerHeight * 0.6);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  return (
+    <AnimatePresence>
+      {visible && (
+        <motion.button
+          type="button"
+          onClick={() => smoothScrollToY(0)}
+          aria-label="Scroll to top"
+          initial={{ opacity: 0, scale: 0.8, y: 10 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.8, y: 10 }}
+          transition={{ duration: 0.25, ease: SMOOTH_EASE }}
+          whileHover={{ scale: 1.08 }}
+          whileTap={{ scale: 0.92 }}
+          className="fixed bottom-6 right-4 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-white/15 bg-black/70 text-white backdrop-blur-md transition-colors hover:border-white/40 sm:bottom-8 sm:right-8 sm:h-12 sm:w-12"
+        >
+          <ArrowUpIcon className="h-4 w-4" />
+        </motion.button>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -2331,16 +2617,44 @@ export default function Home() {
     ['contact', 'Contact'],
   ];
 
+  const services = [
+    {
+      number: '01',
+      title: 'Music Production',
+      description:
+        'Original beat creation and production for artists across genres.',
+    },
+    {
+      number: '02',
+      title: 'Sound Design',
+      description:
+        'Custom audio, foley and sound design for visual storytelling.',
+    },
+    {
+      number: '03',
+      title: 'Film, Games & Advertising',
+      description:
+        'Complete music and audio solutions for visual media and branded content.',
+    },
+    {
+      number: '04',
+      title: 'DJ Sets',
+      description:
+        'Versatile DJ with curated sets for every vibe and mood.',
+    },
+  ];
+
   return (
     <main className="min-h-screen overflow-x-hidden bg-black text-white">
       <GlobalStyles />
       <CustomCursor />
+      <ScrollToTopButton />
 
       <nav
         className={`fixed left-0 right-0 top-0 z-50 border-b transition-all duration-500 ${
           scrolled
-            ? 'border-white/10 bg-black/80 shadow-[0_1px_0_0_rgba(255,255,255,0.04)] backdrop-blur-2xl'
-            : 'border-white/5 bg-black/40 backdrop-blur-xl'
+            ? 'border-white/10 bg-black/80 shadow-[0_1px_0_0_rgba(255,255,255,0.04)] backdrop-blur-md'
+            : 'border-white/5 bg-black/40 backdrop-blur-sm'
         }`}
       >
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
@@ -2394,15 +2708,6 @@ export default function Home() {
               Let's Work
             </button>
 
-            {/*
-              Mobile nav trigger. Previously the nav links were
-              `hidden md:flex` and the "Let's Work" CTA was
-              `hidden sm:block`, which meant phone visitors (below the
-              sm breakpoint) had literally no way to jump to a section
-              other than manually scrolling — the whole nav bar was
-              invisible to them. This button + panel restores that
-              navigation on small screens.
-            */}
             <button
               type="button"
               onClick={() => setMobileMenuOpen((v) => !v)}
@@ -2426,7 +2731,7 @@ export default function Home() {
               animate={{ height: 'auto', opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.32, ease: SMOOTH_EASE }}
-              className="overflow-hidden border-b border-white/10 bg-black/95 backdrop-blur-2xl md:hidden"
+              className="overflow-hidden border-b border-white/10 bg-black/95 backdrop-blur-lg md:hidden"
             >
               <div className="flex flex-col px-4 py-4 sm:px-6">
                 {navItems.map(([id, label]) => (
@@ -2455,7 +2760,7 @@ export default function Home() {
 
       <section
         id="home"
-        className="relative flex min-h-screen items-center justify-center overflow-hidden px-4 pt-16"
+        className="cv-section relative flex min-h-screen items-center justify-center overflow-hidden px-4 pt-16"
       >
         <div className="pointer-events-none absolute inset-0">
           <div className="absolute left-[-15%] top-[-15%] h-[550px] w-[550px] rounded-full bg-yellow-500/[0.08] blur-[120px]" />
@@ -2470,13 +2775,6 @@ export default function Home() {
             Music Producer · DJ · Sound Designer
           </p>
 
-          {/*
-            clamp() instead of a bare 18vw: on very narrow phones 18vw
-            of an 8-letter word can crowd the safe-area edges, and on
-            very wide desktop screens 18vw runs away to an oversized
-            wordmark. clamp gives a sane floor/ceiling while still
-            scaling fluidly with the viewport in between.
-          */}
           <h1
             className="font-black leading-[0.75] tracking-[-0.025em]"
             style={{ fontSize: 'clamp(3.2rem, 18vw, 12rem)' }}
@@ -2512,7 +2810,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="about" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="about" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-14 flex items-end justify-between gap-8">
             <div>
@@ -2586,7 +2884,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="music" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="music" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12 flex items-end justify-between gap-8">
             <div>
@@ -2603,11 +2901,13 @@ export default function Home() {
             </p>
           </div>
 
-          <BeatPlayer />
+          <ErrorBoundary label="BeatPlayer">
+            <BeatPlayer />
+          </ErrorBoundary>
         </div>
       </section>
 
-      <section id="work" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="work" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2622,7 +2922,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="experience" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="experience" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2658,7 +2958,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="live" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="live" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2691,7 +2991,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="releases" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="releases" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2706,7 +3006,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="genres" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="genres" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2717,11 +3017,13 @@ export default function Home() {
             </h2>
           </div>
 
-          <GenreShowcase />
+          <ErrorBoundary label="GenreShowcase">
+            <GenreShowcase />
+          </ErrorBoundary>
         </div>
       </section>
 
-      <section id="services" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="services" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2732,27 +3034,8 @@ export default function Home() {
             </h2>
           </div>
 
-          <div className="grid gap-px overflow-hidden border border-white/10 bg-white/10 md:grid-cols-3">
-            {[
-              {
-                number: '01',
-                title: 'Music Production',
-                description:
-                  'Original beat creation and production for artists across genres.',
-              },
-              {
-                number: '02',
-                title: 'Sound Design',
-                description:
-                  'Custom audio, foley and sound design for visual storytelling.',
-              },
-              {
-                number: '03',
-                title: 'Film, Games & Advertising',
-                description:
-                  'Complete music and audio solutions for visual media and branded content.',
-              },
-            ].map((service) => (
+          <div className="grid gap-px overflow-hidden border border-white/10 bg-white/10 sm:grid-cols-2 lg:grid-cols-4">
+            {services.map((service) => (
               <div
                 key={service.number}
                 className="group bg-black p-7 transition-colors duration-500 hover:bg-zinc-950 md:p-9"
@@ -2772,7 +3055,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section id="gallery" className="border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
+      <section id="gallery" className="cv-section border-t border-white/5 px-4 py-12 sm:px-6 sm:py-16 md:py-20 lg:px-8">
         <div className="mx-auto max-w-6xl">
           <div className="mb-12">
             <p className="mb-3 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
@@ -2783,11 +3066,13 @@ export default function Home() {
             </h2>
           </div>
 
-          <Gallery />
+          <ErrorBoundary label="Gallery">
+            <Gallery />
+          </ErrorBoundary>
         </div>
       </section>
 
-      <section id="contact" className="border-t border-white/5 px-4 py-16 sm:px-6 sm:py-20 md:py-24 lg:px-8">
+      <section id="contact" className="cv-section border-t border-white/5 px-4 py-16 sm:px-6 sm:py-20 md:py-24 lg:px-8">
         <div className="mx-auto max-w-5xl">
           <div className="text-center">
             <p className="mb-5 text-[10px] font-bold uppercase tracking-[0.3em] text-yellow-400">
