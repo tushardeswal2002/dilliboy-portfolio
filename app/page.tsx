@@ -6,6 +6,7 @@ import {
   useRef,
   useCallback,
   useMemo,
+  memo,
   Component,
   type ReactNode,
 } from 'react';
@@ -738,7 +739,13 @@ const beatGradients = [
 
 const beatGlowColors = ['#64748b', '#6366f1', '#06b6d4', '#d946ef', '#f59e0b'];
 
-function BeatPlayer() {
+// Wrapped in React.memo: BeatPlayer takes no props, so its only
+// possible re-render trigger from outside is its parent (Home)
+// re-rendering. Home's own state (`scrolled`, `mobileMenuOpen`) only
+// flips a boolean occasionally, but memo makes this component immune
+// to ANY future parent re-render for free, at zero visual cost —
+// identical render output either way.
+const BeatPlayer = memo(function BeatPlayer() {
   const { audioRef, state, select, seek } = useBeatPlayer(beats);
   const { currentBeatId, isPlaying, isLoading, error, progress, duration } = state;
 
@@ -1201,7 +1208,7 @@ function BeatPlayer() {
       </div>
     </section>
   );
-}
+});
 
 function FeaturedTracks() {
   return (
@@ -1479,7 +1486,9 @@ function bubbleLabelSizeClass(name: string, isCompact: boolean) {
   return 'text-[11px]';
 }
 
-function GenreShowcase() {
+// Same reasoning as BeatPlayer above — no props, memo makes parent
+// re-renders a no-op for this component.
+const GenreShowcase = memo(function GenreShowcase() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const bubbleRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const physicsRef = useRef<BubblePhysics[]>([]);
@@ -1984,14 +1993,86 @@ function GenreShowcase() {
       </div>
     </section>
   );
-}
+});
 
 /* ============================================================= */
 /* GALLERY — grid + a smooth shared-element lightbox with        */
 /* backdrop blur and prev/next navigation.                       */
+/*                                                                 */
+/* Performance pass (visuals/timing unchanged from before):        */
+/*  1. Adjacent-image preloading: the moment the lightbox opens,   */
+/*     and again every time the index changes, the two neighboring */
+/*     photos are fetched+decoded in the background via a plain    */
+/*     `new Image()` (never rendered, invisible). Previously        */
+/*     pressing Next could hit a photo whose thumbnail had never    */
+/*     scrolled into view (masonry grid, lazy-loaded) — a genuine   */
+/*     cold network fetch + decode happening at the exact moment    */
+/*     the crossfade animation needs the main thread, which is      */
+/*     exactly what read as "stutter / freeze / next image takes    */
+/*     too long". This doesn't eagerly load all 11 photos (that     */
+/*     was removed earlier for initial-load weight) — only ever the */
+/*     immediate neighbors of whatever's currently open.            */
+/*  2. The box's resize (landscape box for a landscape photo,       */
+/*     portrait box for a portrait photo) used to go through        */
+/*     Framer's `layout` prop, which measures the DOM before/after  */
+/*     every change (a forced synchronous layout read) to compute   */
+/*     a FLIP transform. That measurement-based approach exists to  */
+/*     support shared-element transitions across DIFFERENT DOM      */
+/*     nodes (via layoutId) — this box has no layoutId anymore      */
+/*     (removed in an earlier pass), so there's nothing being       */
+/*     "shared" and FLIP is pure overhead here. Animating the exact */
+/*     same width/height numbers directly through Framer's `animate`*/
+/*     prop (same values, same transition curve, same duration)     */
+/*     produces an identical resize with no DOM measurement at all —*/
+/*     framer just interpolates two numbers per frame.              */
+/*  3. The thumbnail grid is split into its own memoized             */
+/*     `GalleryGrid` component. Before, it lived in this same        */
+/*     component as the lightbox state — every dims/viewport update */
+/*     (which only the lightbox needs) re-ran this whole component,  */
+/*     including re-creating the JSX for all 11 grid thumbnails on   */
+/*     every one of those updates, for no visible reason.            */
+/*  4. Gallery itself (and the grid) are wrapped in React.memo —     */
+/*     neither takes props, so this makes them immune to re-renders  */
+/*     from the parent (Home) without changing what they render.     */
+/*  5. The resize listener is coalesced through requestAnimationFrame*/
+/*     — mobile browsers can fire several resize/visualViewport      */
+/*     events in quick succession while the address bar animates     */
+/*     in/out, which used to mean several redundant re-renders in a  */
+/*     row while the lightbox was potentially already busy           */
+/*     animating a transition.                                       */
 /* ============================================================= */
 
-function Gallery() {
+const GalleryGrid = memo(function GalleryGrid({
+  onOpen,
+  onImageLoad,
+}: {
+  onOpen: (index: number) => void;
+  onImageLoad: (src: string) => (event: React.SyntheticEvent<HTMLImageElement>) => void;
+}) {
+  return (
+    <div className="columns-1 gap-4 sm:columns-2 lg:columns-3">
+      {galleryImages.map((src, index) => (
+        <motion.button
+          key={src}
+          type="button"
+          onClick={() => onOpen(index)}
+          className="group mb-4 block w-full break-inside-avoid overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 text-left"
+          whileHover={{ y: -4 }}
+          transition={{ duration: 0.4, ease: SMOOTH_EASE }}
+        >
+          <AssetImage
+            src={src}
+            alt={`Dilliboy gallery image ${index + 1}`}
+            className="hover-scale-smooth block h-auto w-full object-cover"
+            onLoad={onImageLoad(src)}
+          />
+        </motion.button>
+      ))}
+    </div>
+  );
+});
+
+const Gallery = memo(function Gallery() {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   // The lightbox overlay is portaled straight to document.body (see the
@@ -2015,11 +2096,10 @@ function Gallery() {
 
   // Real dimensions of each image, used to size the lightbox box to
   // match each photo's real aspect ratio. Populated by each
-  // thumbnail's own onLoad below (they're loading="lazy", so this
-  // fires naturally as a thumbnail scrolls into view) rather than by
-  // eagerly fetching all 11 full-resolution photos on page load,
-  // which used to happen here and was a real chunk of unnecessary
-  // initial page weight.
+  // thumbnail's own onLoad (they're loading="lazy", so this fires
+  // naturally as a thumbnail scrolls into view) AND by the adjacent-
+  // image preloader below, rather than by eagerly fetching all 11
+  // full-resolution photos on page load.
   const dimsRef = useRef<Record<string, { w: number; h: number }>>({});
   const [dimsVersion, setDimsVersion] = useState(0);
   const recordDims = useCallback(
@@ -2035,6 +2115,43 @@ function Gallery() {
     },
     []
   );
+
+  // Adjacent-image preloading. The instant the lightbox opens, and
+  // again every time the index changes, we warm the browser's cache
+  // (and kick off decoding) for the immediate previous/next photo —
+  // NOT the whole gallery. These Image() objects are never attached
+  // to the DOM; they exist purely to make the browser fetch+decode
+  // that exact URL ahead of time, so that when Next/Prev is actually
+  // pressed, the <img> that appears is very likely already cached and
+  // already decoded instead of starting cold at the exact moment the
+  // crossfade animation also needs the main thread.
+  useEffect(() => {
+    if (lightboxIndex === null) return;
+    let cancelled = false;
+
+    const preload = (idx: number) => {
+      const src = galleryImages[idx];
+      if (!src) return;
+      const img = new window.Image();
+      img.onload = () => {
+        if (cancelled || !img.naturalWidth || !img.naturalHeight) return;
+        const existing = dimsRef.current[src];
+        if (existing && existing.w === img.naturalWidth && existing.h === img.naturalHeight) {
+          return;
+        }
+        dimsRef.current[src] = { w: img.naturalWidth, h: img.naturalHeight };
+        setDimsVersion((v) => v + 1);
+      };
+      img.src = src;
+    };
+
+    preload((lightboxIndex + 1) % galleryImages.length);
+    preload((lightboxIndex - 1 + galleryImages.length) % galleryImages.length);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [lightboxIndex]);
 
   // On mobile, window.innerHeight can report the taller "layout
   // viewport" (the height available with the browser's address bar
@@ -2057,13 +2174,27 @@ function Gallery() {
 
   const [viewport, setViewport] = useState(getViewportSize);
 
+  // Coalesced through rAF: mobile can fire several resize /
+  // visualViewport "resize" events back-to-back while the address bar
+  // animates in or out. Without this, each one of those triggers its
+  // own state update (and re-render) — batching them to "at most once
+  // per animation frame" doesn't change the final measured value,
+  // just how many times we redundantly recompute it.
+  const resizeRafRef = useRef<number | null>(null);
   useEffect(() => {
-    const onResize = () => setViewport(getViewportSize());
+    const onResize = () => {
+      if (resizeRafRef.current !== null) return;
+      resizeRafRef.current = requestAnimationFrame(() => {
+        resizeRafRef.current = null;
+        setViewport(getViewportSize());
+      });
+    };
     window.addEventListener('resize', onResize);
     window.visualViewport?.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('resize', onResize);
       window.visualViewport?.removeEventListener('resize', onResize);
+      if (resizeRafRef.current !== null) cancelAnimationFrame(resizeRafRef.current);
     };
   }, []);
 
@@ -2157,25 +2288,7 @@ function Gallery() {
 
   return (
     <div className="relative">
-      <div className="columns-1 gap-4 sm:columns-2 lg:columns-3">
-        {galleryImages.map((src, index) => (
-          <motion.button
-            key={src}
-            type="button"
-            onClick={() => openAt(index)}
-            className="group mb-4 block w-full break-inside-avoid overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 text-left"
-            whileHover={{ y: -4 }}
-            transition={{ duration: 0.4, ease: SMOOTH_EASE }}
-          >
-            <AssetImage
-              src={src}
-              alt={`Dilliboy gallery image ${index + 1}`}
-              className="hover-scale-smooth block h-auto w-full object-cover"
-              onLoad={recordDims(src)}
-            />
-          </motion.button>
-        ))}
-      </div>
+      <GalleryGrid onOpen={openAt} onImageLoad={recordDims} />
 
       {mounted &&
         createPortal(
@@ -2223,15 +2336,25 @@ function Gallery() {
                   ›
                 </button>
 
+                {/*
+                  Width/height now live in `animate` (interpolated
+                  directly, frame by frame, as plain numbers) instead
+                  of being set via `style` + the `layout` prop (which
+                  measures the DOM before/after to build a FLIP
+                  transform). Same start value, same end value, same
+                  transition curve and duration below — the box resizes
+                  identically to before, just without a forced layout
+                  read on every navigation.
+                */}
                 <motion.div
-                  layout
                   className="relative overflow-hidden rounded-2xl border border-white/10 bg-zinc-950"
-                  style={{
+                  initial={{ opacity: 0, scale: 0.88 }}
+                  animate={{
+                    opacity: 1,
+                    scale: 1,
                     width: lightboxBox?.width,
                     height: lightboxBox?.height,
                   }}
-                  initial={{ opacity: 0, scale: 0.88 }}
-                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.92 }}
                   transition={{ duration: 0.3, ease: SMOOTH_EASE }}
                   onClick={(e) => e.stopPropagation()}
@@ -2289,7 +2412,7 @@ function Gallery() {
         )}
     </div>
   );
-}
+});
 
 /* ============================================================= */
 /* HERO SIDE FLOW — faint, looping columns of gallery imagery    */
