@@ -12,7 +12,7 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-const siteUrl = "https://dilliboy.com";
+const siteUrl = "https://www.dilliboy.com";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -58,17 +58,27 @@ export const metadata: Metadata = {
     canonical: siteUrl,
   },
 
+  icons: {
+    icon: "/icon.png",
+    shortcut: "/icon.png",
+    apple: "/icon.png",
+  },
+
   openGraph: {
     type: "website",
     url: siteUrl,
     siteName: "DILLIBOY",
+
     title: "DILLIBOY — Music Producer, DJ & Sound Designer",
+
     description:
       "Music producer, DJ and sound designer creating music and audio for artists, film, games, advertising and branded content.",
+
     locale: "en_IN",
+
     images: [
       {
-        url: "/opengraph-image",
+        url: "/dilliboy-og.png",
         width: 1200,
         height: 630,
         alt: "DILLIBOY — Music Producer, DJ & Sound Designer",
@@ -78,15 +88,19 @@ export const metadata: Metadata = {
 
   twitter: {
     card: "summary_large_image",
+
     title: "DILLIBOY — Music Producer, DJ & Sound Designer",
+
     description:
       "Music producer, DJ and sound designer creating music and audio for artists, film, games, advertising and branded content.",
-    images: ["/opengraph-image"],
+
+    images: ["/dilliboy-og.png"],
   },
 
   robots: {
     index: true,
     follow: true,
+
     googleBot: {
       index: true,
       follow: true,

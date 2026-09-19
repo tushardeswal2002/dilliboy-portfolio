@@ -1470,12 +1470,12 @@ const bubbleGradients = [
 function bubbleLabelSizeClass(name: string, isCompact: boolean) {
   const len = name.length;
   if (isCompact) {
-    if (len > 9) return 'text-[7px]';
+    if (len >= 9) return 'text-[7px]';
     if (len > 6) return 'text-[8px]';
     return 'text-[9px]';
   }
   if (len > 13) return 'text-[9px]';
-  if (len > 9) return 'text-[10px]';
+  if (len >= 9) return 'text-[10px]';
   return 'text-[11px]';
 }
 
@@ -1544,7 +1544,7 @@ function GenreShowcase() {
       // smaller font — a bit more room in the circle itself, on top
       // of the tiered font sizing below, is what actually stops the
       // longest names from needing to wrap at all in most cases.
-      const lengthBonus = genre.name.length > 9 ? (compact ? 5 : 4) : genre.name.length > 6 ? 2 : 0;
+      const lengthBonus = genre.name.length >= 9 ? (compact ? 6 : 4) : genre.name.length > 6 ? 2 : 0;
       const r = baseRadius + lengthBonus - (compact ? 2 : 0);
       let x = 0;
       let y = 0;
@@ -2036,16 +2036,35 @@ function Gallery() {
     []
   );
 
-  const [viewport, setViewport] = useState(() => ({
-    w: typeof window !== 'undefined' ? window.innerWidth : 1200,
-    h: typeof window !== 'undefined' ? window.innerHeight : 800,
-  }));
+  // On mobile, window.innerHeight can report the taller "layout
+  // viewport" (the height available with the browser's address bar
+  // hidden) even while the address bar is actually showing — and since
+  // this lightbox is `fixed inset-0`, sizing the box off that inflated
+  // number could make it taller than what's actually visible, with the
+  // browser chrome covering a sliver of the image's top or bottom
+  // (looking like the image was cropped, with the dark backdrop
+  // showing through as bars). window.visualViewport.height reflects
+  // the real, currently-visible area and updates live as the address
+  // bar shows/hides, so we prefer it wherever it's available.
+  const getViewportSize = () => {
+    if (typeof window === 'undefined') return { w: 1200, h: 800 };
+    const vv = window.visualViewport;
+    return {
+      w: vv?.width ?? window.innerWidth,
+      h: vv?.height ?? window.innerHeight,
+    };
+  };
+
+  const [viewport, setViewport] = useState(getViewportSize);
 
   useEffect(() => {
-    const onResize = () =>
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
+    const onResize = () => setViewport(getViewportSize());
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.visualViewport?.addEventListener('resize', onResize);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.visualViewport?.removeEventListener('resize', onResize);
+    };
   }, []);
 
   // Recomputed per lightboxIndex so the box actually matches whatever
@@ -2058,7 +2077,10 @@ function Gallery() {
     const dims = dimsRef.current[src];
     const isMobile = viewport.w < 640;
     const maxW = Math.min(viewport.w * (isMobile ? 0.94 : 0.88), 1400);
-    const maxH = viewport.h * (isMobile ? 0.68 : 0.78);
+    // A bit more headroom on mobile than before (0.68 → 0.6) so the
+    // box has margin to spare even if the address bar changes height
+    // right as the lightbox opens.
+    const maxH = viewport.h * (isMobile ? 0.6 : 0.78);
     const ratio = dims ? dims.w / dims.h : 1.5;
 
     let width = maxW;
@@ -2160,7 +2182,8 @@ function Gallery() {
           <AnimatePresence>
             {lightboxIndex !== null && openedIndex !== null && (
               <motion.div
-                className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-4 backdrop-blur-2xl"
+                className="fixed inset-0 z-[200] flex items-center justify-center bg-black/85 p-4 backdrop-blur-md sm:backdrop-blur-2xl"
+                style={{ maxHeight: '100dvh' }}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
